@@ -1,0 +1,58 @@
+# ---- PYTHON / DJANGO ----
+
+# Byte-compiled / optimized / DLL files
+*.py[cod]
+__pycache__/
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environment folders
+venv/
+.venv/
+env/
+.venv/
+
+# Django logs and database
+*.log
+*.sqlite3
+
+# If you're using coverage reports
+htmlcov/
+
+# Environment variable files
+.env
+.env.*
+
+
+# ---- NEXT.JS / REACT ----
+
+# Node modules
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Production build artifacts
+*.log
+*.cache
+
+# If you use Yarn/PNPM to handle dependencies, ignore the pnp files
+.yarn/*
+.pnp.*
+.pnp.js
+
+# Optional: OS-specific files
+.DS_Store
+Thumbs.db
+
+# Optional: If you generate coverage via Jest
+coverage/
+
+# Optional: If you have a .env in frontend
+.env.local
+.env.development.local
+.env.production.local
