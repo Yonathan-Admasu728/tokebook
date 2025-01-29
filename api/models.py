@@ -43,6 +43,15 @@ class User(AbstractUser):
             self.has_pencil_flag = True
             # Always use employee ID as pencil ID for casino managers
             self.pencil_id = self.employee_id
+            
+        # Ensure username matches employee_id
+        if self.employee_id and not self.username:
+            self.username = self.employee_id
+            
+        # If this is a new user (no ID yet), ensure password is hashed
+        if not self.id and self.password and not self.password.startswith(('pbkdf2_sha256$', 'bcrypt$', 'argon2')):
+            self.set_password(self.password)
+            
         super().save(*args, **kwargs)
 
     def __str__(self):

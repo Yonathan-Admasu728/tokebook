@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.contrib.auth.hashers import make_password
 from .models import User, Casino, Tokes, TokeSignOff, DealerVacation, EarlyOutRequest, Discrepancy
 
 class UserSerializer(serializers.ModelSerializer):
@@ -16,14 +17,42 @@ class UserSerializer(serializers.ModelSerializer):
         shift_labels = {1: 'Day', 2: 'Swing', 3: 'Grave'}
         return shift_labels.get(obj.shift, 'Unknown')
 
+    password = serializers.CharField(write_only=True, required=False)
+
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'first_name', 'last_name', 'email',
+            'id', 'username', 'password', 'first_name', 'last_name', 'email',
             'employee_id', 'role', 'has_pencil_flag', 'pencil_id', 'casino', 'casino_name',
             'name', 'shift', 'shift_label'
         ]
         read_only_fields = ['id']
+
+    def create(self, validated_data):
+        # Create user instance but don't save yet
+        password = validated_data.pop('password', None)
+        user = User(**validated_data)
+        
+        # Set password and save
+        if password:
+            user.set_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        # Handle password separately
+        password = validated_data.pop('password', None)
+        
+        # Update other fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+            
+        # Set password if provided
+        if password:
+            instance.set_password(password)
+            
+        instance.save()
+        return instance
 
 class CasinoSerializer(serializers.ModelSerializer):
     class Meta:
@@ -41,10 +70,17 @@ class TokesSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 class EarlyOutRequestSerializer(serializers.ModelSerializer):
+    user_name = serializers.CharField(source='user.get_full_name', read_only=True)
+    authorized_by_name = serializers.CharField(source='authorized_by.get_full_name', read_only=True)
+
     class Meta:
         model = EarlyOutRequest
-        fields = ['id', 'status', 'hours_worked']
-        read_only_fields = ['id']
+        fields = [
+            'id', 'user', 'user_name', 'pit_number', 'table_number',
+            'requested_at', 'status', 'reason', 'authorized_by',
+            'authorized_by_name', 'hours_worked'
+        ]
+        read_only_fields = ['id', 'user', 'requested_at', 'authorized_by']
 
 class TokeSignOffSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)

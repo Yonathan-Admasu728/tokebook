@@ -30,8 +30,21 @@ def login(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    user = authenticate(username=username, password=password)
+    print(f'Attempting to authenticate user with username: {username}')
+    try:
+        existing_user = User.objects.get(username=username)
+        print(f'Found user in database: {existing_user.username}, active: {existing_user.is_active}')
+        print(f'Stored password hash: {existing_user.password}')
+    except User.DoesNotExist:
+        print(f'No user found with username: {username}')
+        existing_user = None
+
+    from api.authentication import CustomModelBackend
+    auth_backend = CustomModelBackend()
+    user = auth_backend.authenticate(request, username=username, password=password)
     print(f'Authentication result for {username}:', 'Success' if user else 'Failed')
+    if not user and existing_user:
+        print('User exists but authentication failed - password mismatch')
     if not user:
         return Response(
             {'error': 'Invalid credentials'},

@@ -4,6 +4,8 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
+from django.db import models
 from ..models import TokeSignOff, Tokes, EarlyOutRequest, Casino, Discrepancy, DealerVacation, User
 from ..serializers import (
     TokeSignOffSerializer,
@@ -97,19 +99,68 @@ class TokeSignOffViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+from rest_framework.permissions import IsAuthenticated
+from ..authentication import CustomJWTAuthentication
+
 class EarlyOutRequestViewSet(viewsets.ModelViewSet):
     queryset = EarlyOutRequest.objects.all()
     serializer_class = EarlyOutRequestSerializer
+    authentication_classes = [CustomJWTAuthentication]
+    permission_classes = [IsAuthenticated]
 
     @action(detail=False, methods=['get'])
     def current_list(self, request):
         """Get list of early out requests for today."""
+        print('EarlyOutRequestViewSet.current_list() called')
+        print('User:', request.user)
+        print('User role:', getattr(request.user, 'role', None))
+        print('Auth header:', request.META.get('HTTP_AUTHORIZATION', 'No auth header'))
+        print('Query params:', request.query_params)
+        
         today = timezone.now().date()
-        early_outs = self.queryset.filter(
+        list_type = request.query_params.get('list_type', 'dealer')
+        shift = request.query_params.get('shift')
+        
+        # Get all active requests for today (excluding REMOVED)
+        active_requests = EarlyOutRequest.objects.filter(
             requested_at__date=today,
             status__in=['PENDING', 'APPROVED']
-        ).order_by('requested_at')
+        ).exclude(
+            status='REMOVED'
+        )
+
+        # Get the latest request for each user
+        latest_requests = {}
+        for request in active_requests:
+            user_id = request.user_id
+            if user_id not in latest_requests or request.requested_at > latest_requests[user_id].requested_at:
+                # Only include if the request is not REMOVED
+                if request.status != 'REMOVED':
+                    latest_requests[user_id] = request
+
+        # Get the IDs of the latest active requests
+        latest_request_ids = [req.id for req in latest_requests.values()]
+
+        # Filter the queryset to only include the latest active request for each user
+        queryset = self.queryset.filter(
+            id__in=latest_request_ids,
+            status__in=['PENDING', 'APPROVED']
+        )
+
+        # Filter by shift if provided
+        if shift:
+            shift_mapping = {'day': 1, 'swing': 2, 'grave': 3}
+            shift_number = shift_mapping.get(shift.lower())
+            if shift_number:
+                queryset = queryset.filter(user__shift=shift_number)
         
+        # Filter based on user role
+        if list_type == 'supervisor':
+            queryset = queryset.filter(user__role='SUPERVISOR')
+        else:  # dealer
+            queryset = queryset.filter(user__role='DEALER')
+            
+        early_outs = queryset.order_by('requested_at')
         serializer = self.get_serializer(early_outs, many=True)
         return Response(serializer.data)
 
@@ -117,6 +168,45 @@ class EarlyOutRequestViewSet(viewsets.ModelViewSet):
     def add_to_list(self, request):
         """Add user to early out list."""
         try:
+            list_type = request.query_params.get('list_type', 'dealer')
+            
+            # Verify user role matches list type
+            if list_type == 'supervisor' and request.user.role != 'SUPERVISOR':
+                return Response(
+                    {'error': 'Only supervisors can join the supervisor early out list'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            elif list_type == 'dealer' and request.user.role != 'DEALER':
+                return Response(
+                    {'error': 'Only dealers can join the dealer early out list'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            shift = request.query_params.get('shift')
+            shift_mapping = {'day': 1, 'swing': 2, 'grave': 3}
+            shift_number = shift_mapping.get(shift.lower()) if shift else None
+            print(f"Comparing shifts - User shift: {request.user.shift}, Request shift: {shift_number}")
+            if shift_number and request.user.shift != shift_number:
+                return Response(
+                    {'error': 'You can only join the early out list for your assigned shift'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Check for any active requests for today
+            today = timezone.now().date()
+            active_request = EarlyOutRequest.objects.filter(
+                user=request.user,
+                requested_at__date=today,
+                status__in=['PENDING', 'APPROVED']
+            ).order_by('-requested_at').first()
+
+            if active_request:
+                return Response(
+                    {'error': 'Duplicate request', 'details': 'You already have an early out request for today'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Create new request
             early_out = EarlyOutRequest.objects.create(
                 user=request.user,
                 pit_number=request.data.get('pit_number', ''),
@@ -135,12 +225,27 @@ class EarlyOutRequestViewSet(viewsets.ModelViewSet):
     def remove_from_list(self, request, pk=None):
         """Remove user from early out list."""
         try:
+            list_type = request.query_params.get('list_type', 'dealer')
             early_out = self.get_object()
+            
+            # Verify user role matches list type
+            if list_type == 'supervisor' and request.user.role != 'SUPERVISOR':
+                return Response(
+                    {'error': 'Only supervisors can remove from the supervisor early out list'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            elif list_type == 'dealer' and request.user.role != 'DEALER':
+                return Response(
+                    {'error': 'Only dealers can remove from the dealer early out list'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
             if early_out.user != request.user:
                 return Response(
                     {'error': 'Not authorized to remove this request'},
                     status=status.HTTP_403_FORBIDDEN
                 )
+                
             early_out.status = 'REMOVED'
             early_out.save()
             return Response(status=status.HTTP_204_NO_CONTENT)
@@ -219,11 +324,19 @@ class DealerViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """Create a new dealer"""
-        # Ensure the role is set to DEALER
-        request.data['role'] = 'DEALER'
-        serializer = self.get_serializer(data=request.data)
+        # Ensure required fields are set
+        data = request.data.copy()
+        data['role'] = 'DEALER'
+        data['is_active'] = True
+        data['username'] = data.get('employee_id')  # Set username to employee_id
+        
+        # Include password in initial data
+        data['password'] = 'testpass123'
+        
+        # Create the user with all data including password
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
+        user = serializer.save()
         return Response({
             'success': True,
             'data': serializer.data
@@ -275,9 +388,14 @@ class DealerViewSet(viewsets.ModelViewSet):
             if hasattr(dealer, field):
                 setattr(dealer, field, value)
 
+        # Update basic dealer data
         dealer.is_active = True
         dealer.archived_by = None
         dealer.archived_at = None
+        dealer.username = dealer.employee_id  # Ensure username matches employee_id
+        
+        # Set password directly using set_password
+        dealer.set_password('testpass123')
         dealer.save()
 
         serializer = self.get_serializer(dealer)
@@ -335,9 +453,16 @@ class SupervisorViewSet(viewsets.ModelViewSet):
         """Create a new supervisor"""
         data = request.data.copy()
         data['role'] = 'SUPERVISOR'  # Enforce role to SUPERVISOR
+        data['is_active'] = True
+        data['username'] = data.get('employee_id')  # Set username to employee_id
+        
+        # Include password in initial data
+        data['password'] = 'testpass123'
+        
+        # Create the user with all data including password
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
+        user = serializer.save()
         headers = self.get_success_headers(serializer.data)
         return Response({
             'success': True,
@@ -478,6 +603,26 @@ class DealerVacationViewSet(viewsets.ModelViewSet):
         vacation.save()
         
         serializer = self.get_serializer(vacation)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def current(self, request):
+        """Get current dealer vacations."""
+        list_type = request.query_params.get('list_type', 'all')
+        today = timezone.now().date()
+        
+        queryset = self.queryset.filter(
+            start_date__lte=today,
+            end_date__gte=today,
+            status='APPROVED'
+        )
+        
+        if list_type == 'supervisor':
+            queryset = queryset.filter(user__role='SUPERVISOR')
+        elif list_type == 'dealer':
+            queryset = queryset.filter(user__role='DEALER')
+            
+        serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])

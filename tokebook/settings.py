@@ -94,6 +94,11 @@ DATABASES = {
 # Custom User Model
 AUTH_USER_MODEL = 'api.User'
 
+# Authentication settings
+AUTHENTICATION_BACKENDS = [
+    'api.authentication.CustomModelBackend',
+]
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -130,6 +135,12 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+    'COMPACT_JSON': False,
+    'UNICODE_JSON': True,
+    'COERCE_DECIMAL_TO_STRING': True,
 }
 
 # JWT Settings
@@ -181,6 +192,8 @@ CORS_ALLOW_ALL_ORIGINS = False  # Change to False for security
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
 ]
 CORS_ALLOW_METHODS = [
     'DELETE',
