@@ -22,8 +22,9 @@ urlpatterns = [
     path('auth/reset-password/', csrf_exempt(reset_password), name='reset_password'),
 
     # Core functionality routes
-    path('tokes/current/', csrf_exempt(viewsets.TokesViewSet.as_view({'get': 'current', 'post': 'current'})), name='current_toke'),
+    path('tokes/current/', csrf_exempt(viewsets.TokesViewSet.as_view({'get': 'current', 'post': 'create_toke'})), name='current_toke'),
     path('tokes/manage/current/', csrf_exempt(viewsets.TokesViewSet.as_view({'get': 'manage_current'})), name='manage_current_toke'),
+    path('toke-signoffs/<uuid:pk>/update-hours/', csrf_exempt(viewsets.TokeSignOffViewSet.as_view({'post': 'update_hours'})), name='update_toke_hours'),
     path('tokes/<uuid:pk>/sign/', csrf_exempt(viewsets.TokesViewSet.as_view({'post': 'sign'})), name='sign_toke'),
     path('toke-signoffs/last_shift/', csrf_exempt(viewsets.TokeSignOffViewSet.as_view({'get': 'last_shift'})), name='last_shift'),
 
@@ -41,6 +42,7 @@ urlpatterns = [
     path('early-out-requests/current-list/', csrf_exempt(viewsets.EarlyOutRequestViewSet.as_view({'get': 'current_list'})), name='early-out-request-current-list'),
     path('early-out-requests/add-to-list/', csrf_exempt(viewsets.EarlyOutRequestViewSet.as_view({'post': 'add_to_list'})), name='early-out-request-add'),
     path('early-out-requests/<int:pk>/remove-from-list/', csrf_exempt(viewsets.EarlyOutRequestViewSet.as_view({'delete': 'remove_from_list'})), name='early-out-request-remove'),
+    path('early-out-requests/<int:pk>/authorize/', csrf_exempt(viewsets.EarlyOutRequestViewSet.as_view({'post': 'authorize'})), name='early-out-request-authorize'),
 
     # Router URLs
     path('', include(router.urls)),

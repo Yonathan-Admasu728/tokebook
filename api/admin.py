@@ -31,7 +31,7 @@ class TokesAdmin(admin.ModelAdmin):
 
 @admin.register(TokeSignOff)
 class TokeSignOffAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'toke', 'hours', 'shift_start', 'shift_end', 'created_at')
+    list_display = ('id', 'user', 'toke', 'scheduled_hours', 'actual_hours', 'shift_start', 'shift_end', 'created_at')
     list_filter = ('created_at', 'toke__date')
     search_fields = ('user__username', 'user__first_name', 'user__last_name')
     readonly_fields = ('created_at', 'updated_at')

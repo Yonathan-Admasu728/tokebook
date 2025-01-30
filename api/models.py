@@ -62,8 +62,48 @@ class User(AbstractUser):
 class Casino(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True)
+    
+    # Shift timing configuration
+    grave_start = models.TimeField(default='01:30')  # 1:30 AM
+    grave_end = models.TimeField(default='09:30')    # 9:30 AM
+    day_start = models.TimeField(default='09:30')    # 9:30 AM
+    day_end = models.TimeField(default='17:30')      # 5:30 PM
+    swing_start = models.TimeField(default='17:30')  # 5:30 PM
+    swing_end = models.TimeField(default='01:30')    # 1:30 AM
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def get_current_shift(self):
+        """
+        Determines the current shift based on casino's shift configuration
+        Returns: 'day', 'swing', or 'grave'
+        """
+        def time_to_minutes(t):
+            return t.hour * 60 + t.minute
+
+        current_time = timezone.localtime().time()
+        current_minutes = time_to_minutes(current_time)
+        
+        # Convert all shift times to minutes
+        grave_start = time_to_minutes(self.grave_start)  # 90 (1:30 AM)
+        grave_end = time_to_minutes(self.grave_end)      # 570 (9:30 AM)
+        day_start = time_to_minutes(self.day_start)      # 570 (9:30 AM)
+        day_end = time_to_minutes(self.day_end)          # 1050 (5:30 PM)
+        swing_start = time_to_minutes(self.swing_start)   # 1050 (5:30 PM)
+        swing_end = time_to_minutes(self.swing_end)       # 90 (1:30 AM)
+
+        # Day shift: 9:30 AM (570) to 5:30 PM (1050)
+        if day_start <= current_minutes < day_end:
+            return 'day'
+            
+        # Grave shift: 1:30 AM (90) to 9:30 AM (570)
+        if grave_start <= current_minutes < grave_end:
+            return 'grave'
+            
+        # Swing shift: 5:30 PM (1050) to 1:30 AM (90)
+        # If we're not in day or grave shift, we must be in swing shift
+        return 'swing'
 
     class Meta:
         ordering = ['name']
@@ -75,6 +115,7 @@ class Tokes(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     date = models.DateField()
     finalized = models.BooleanField(default=False)
+    is_collection_day = models.BooleanField(default=True, help_text='True if this is a collection day, False if distribution day')
     per_hour_rate = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -95,16 +136,49 @@ class TokeSignOff(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     toke = models.ForeignKey(Tokes, on_delete=models.CASCADE)
-    hours = models.DecimalField(
+    toke_hours = models.DecimalField(
         max_digits=5,
         decimal_places=2,
         null=True,
-        blank=True
+        blank=True,
+        help_text='Final toke distribution hours'
     )
+    scheduled_hours = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=8.00,
+        help_text='Scheduled shift duration in hours'
+    )
+    actual_hours = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Actual hours worked (updated if early out authorized)'
+    )
+    original_hours = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Original hours before any adjustments'
+    )
+    shift_date = models.DateField(null=True, blank=True)
     shift_start = models.TimeField(null=True, blank=True)
     shift_end = models.TimeField(null=True, blank=True)
+    signed_at = models.DateTimeField(auto_now_add=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        # When first created, set actual_hours to scheduled_hours
+        if not self.pk:  # New instance
+            self.actual_hours = self.scheduled_hours
+            self.original_hours = self.scheduled_hours
+            # Set shift_date from toke's date if not provided
+            if not hasattr(self, 'shift_date') and self.toke:
+                self.shift_date = self.toke.date
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ['-created_at']

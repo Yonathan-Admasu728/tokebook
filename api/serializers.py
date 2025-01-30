@@ -55,19 +55,50 @@ class UserSerializer(serializers.ModelSerializer):
         return instance
 
 class CasinoSerializer(serializers.ModelSerializer):
+    current_shift = serializers.CharField(source='get_current_shift', read_only=True)
+    
     class Meta:
         model = Casino
-        fields = ['id', 'name', 'created_at', 'updated_at']
+        fields = [
+            'id', 'name', 
+            'grave_start', 'grave_end',
+            'day_start', 'day_end',
+            'swing_start', 'swing_end',
+            'current_shift',
+            'created_at', 'updated_at'
+        ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate(self, data):
+        """
+        Validate that shift times make sense and cover 24 hours
+        """
+        if 'day_start' in data and 'day_end' in data:
+            if data['day_start'] >= data['day_end']:
+                raise serializers.ValidationError({
+                    'day_end': 'Day shift end time must be after start time'
+                })
+
+        # Note: We don't validate swing and grave shifts the same way
+        # because they can cross midnight
+
+        return data
+
 class TokesSerializer(serializers.ModelSerializer):
+    signOffs = serializers.SerializerMethodField()
+    date = serializers.DateField(format='%Y-%m-%d')
+
     class Meta:
         model = Tokes
         fields = [
             'id', 'date', 'finalized', 'per_hour_rate',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'signOffs'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_signOffs(self, obj):
+        sign_offs = TokeSignOff.objects.filter(toke=obj).select_related('user')
+        return TokeSignOffSerializer(sign_offs, many=True).data
 
 class EarlyOutRequestSerializer(serializers.ModelSerializer):
     user_name = serializers.CharField(source='user.get_full_name', read_only=True)
@@ -86,13 +117,15 @@ class TokeSignOffSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     early_out = serializers.SerializerMethodField()
     is_on_vacation = serializers.BooleanField(default=False)
+    signed_at = serializers.DateTimeField(format='%Y-%m-%dT%H:%M:%S')
 
     class Meta:
         model = TokeSignOff
         fields = [
             'id', 'user', 'shift_date', 'shift_start', 'shift_end',
-            'hours_worked', 'early_out', 'is_on_vacation',
-            'created_at', 'updated_at'
+            'scheduled_hours', 'actual_hours', 'original_hours',
+            'toke_hours', 'early_out', 'is_on_vacation',
+            'created_at', 'updated_at', 'signed_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 

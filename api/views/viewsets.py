@@ -27,35 +27,196 @@ class CasinoViewSet(viewsets.ModelViewSet):
     queryset = Casino.objects.all()
     serializer_class = CasinoSerializer
 
+    @action(detail=False, methods=['get'])
+    def shift_times(self, request):
+        """Get shift times for a casino by name."""
+        casino_name = request.query_params.get('name')
+        if not casino_name:
+            return Response(
+                {'error': 'Casino name is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        try:
+            casino = Casino.objects.get(name=casino_name)
+            return Response({
+                'grave_start': casino.grave_start.strftime('%H:%M'),
+                'grave_end': casino.grave_end.strftime('%H:%M'),
+                'day_start': casino.day_start.strftime('%H:%M'),
+                'day_end': casino.day_end.strftime('%H:%M'),
+                'swing_start': casino.swing_start.strftime('%H:%M'),
+                'swing_end': casino.swing_end.strftime('%H:%M'),
+                'current_shift': casino.get_current_shift()
+            })
+        except Casino.DoesNotExist:
+            return Response(
+                {'error': f'Casino "{casino_name}" not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=True, methods=['patch'])
+    def update_shift_times(self, request, pk=None):
+        """Update shift times for a casino."""
+        if request.user.role != 'ADMIN':
+            return Response(
+                {'error': 'Only admin users can modify shift times'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        casino = self.get_object()
+        serializer = self.get_serializer(casino, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
 class TokesViewSet(viewsets.ModelViewSet):
     serializer_class = TokesSerializer
 
     def get_queryset(self):
         return Tokes.objects.all().order_by('-date')
 
-    @action(detail=False, methods=['get', 'post'])
-    def current(self, request):
-        """Get or create current toke."""
-        today = timezone.now().date()
-        current_toke = Tokes.objects.filter(date=today).first()
-        
-        if request.method == 'GET':
-            if not current_toke:
+    @action(detail=True, methods=['post'])
+    def sign(self, request, pk=None):
+        """Sign off for tokes with scheduled and actual hours."""
+        try:
+            # Get required fields
+            hours = request.data.get('hours')
+            shift_start = request.data.get('shift_start')
+            shift_end = request.data.get('shift_end')
+            shift_date = request.data.get('shift_date')
+
+            # Validate input
+            if not all([hours, shift_start, shift_end, shift_date]):
                 return Response(
-                    {'error': 'No toke found for today'},
-                    status=status.HTTP_404_NOT_FOUND
+                    {'error': 'Missing required fields'},
+                    status=status.HTTP_400_BAD_REQUEST
                 )
+
+            # Create sign off
+            sign_off = TokeSignOff.objects.create(
+                user=request.user,
+                toke_id=pk,
+                shift_date=shift_date,
+                shift_start=shift_start,
+                shift_end=shift_end,
+                scheduled_hours=hours,  # Set scheduled hours
+                actual_hours=hours,     # Initially set actual hours to scheduled
+                original_hours=hours    # Store original hours
+            )
+
+            return Response({
+                'success': True,
+                'data': TokeSignOffSerializer(sign_off).data
+            })
+
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['get', 'post'])
+    def create_toke(self, request):
+        """Create a new toke for today."""
+        try:
+            today = timezone.now().date()
+            current_toke = Tokes.objects.filter(date=today).first()
+            
+            if current_toke:
+                serializer = self.get_serializer(current_toke)
+                return Response(serializer.data)
+            
+            current_toke = Tokes.objects.create(date=today)
             serializer = self.get_serializer(current_toke)
-            return Response(serializer.data)
-        
-        # POST method - create if doesn't exist
-        if current_toke:
-            serializer = self.get_serializer(current_toke)
-            return Response(serializer.data)
-        
-        current_toke = Tokes.objects.create(date=today)
-        serializer = self.get_serializer(current_toke)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['get'])
+    def current(self, request):
+        """Get today's toke sign-offs including vacation and early-out information."""
+        try:
+            # Get today's date in the casino's timezone
+            today = timezone.localtime().date()
+            
+            # Get all sign-offs for today
+            sign_offs = TokeSignOff.objects.filter(
+                shift_date=today
+            ).select_related('user')
+
+            # Get all dealers on vacation today
+            vacations = DealerVacation.objects.filter(
+                start_date__lte=today,
+                end_date__gte=today
+            ).select_related('user')
+
+            # Create vacation sign-offs
+            vacation_sign_offs = []
+            for vacation in vacations:
+                # Skip if dealer already signed in
+                if not sign_offs.filter(user=vacation.user).exists():
+                    vacation_sign_offs.append(TokeSignOff(
+                        user=vacation.user,
+                        shift_date=today,
+                        shift_start="00:00",
+                        shift_end="00:00",
+                        scheduled_hours=8.0,  # Default to 8 hours for vacation
+                        actual_hours=8.0,     # Same for actual hours
+                        original_hours=8.0,   # And original hours
+                        is_on_vacation=True
+                    ))
+
+            # Get early-out requests for today's sign-offs
+            early_outs = EarlyOutRequest.objects.filter(
+                user__in=[s.user for s in sign_offs],
+                requested_at__date=today,
+                status__in=['PENDING', 'APPROVED']
+            ).select_related('user')
+
+            # Create early-out lookup
+            early_out_lookup = {
+                eo.user_id: {
+                    'id': eo.id,
+                    'status': eo.status,
+                    'hours_worked': eo.hours_worked if eo.status == 'APPROVED' else None
+                }
+                for eo in early_outs
+            }
+
+            # Combine regular and vacation sign-offs
+            all_sign_offs = list(sign_offs) + vacation_sign_offs
+
+            # Format response
+            response_data = {
+                'id': str(today),
+                'date': today.isoformat(),
+                'signOffs': [{
+                    'id': str(sign_off.id) if not getattr(sign_off, 'is_on_vacation', False) else f"v-{sign_off.user.id}",
+                    'user': {
+                        'id': str(sign_off.user.id),
+                        'name': sign_off.user.get_full_name(),
+                        'role': sign_off.user.role
+                    },
+                    'shift_start': sign_off.shift_start,
+                    'shift_end': sign_off.shift_end,
+                    'scheduled_hours': sign_off.scheduled_hours,
+                    'actual_hours': sign_off.actual_hours,
+                    'early_out': early_out_lookup.get(sign_off.user.id),
+                    'is_on_vacation': getattr(sign_off, 'is_on_vacation', False)
+                } for sign_off in all_sign_offs]
+            }
+
+            return Response(response_data)
+
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=False, methods=['get'])
     def manage_current(self, request):
@@ -75,6 +236,55 @@ class TokesViewSet(viewsets.ModelViewSet):
 class TokeSignOffViewSet(viewsets.ModelViewSet):
     queryset = TokeSignOff.objects.all()
     serializer_class = TokeSignOffSerializer
+
+    @action(detail=True, methods=['post'])
+    def update_hours(self, request, pk=None):
+        """Update actual hours for a toke sign off."""
+        try:
+            # Validate user has pencil access
+            if not request.user.has_pencil_flag:
+                return Response(
+                    {'error': 'Only users with pencil access can update hours'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            signoff = self.get_object()
+
+            # Validate request body
+            actual_hours = request.data.get('actual_hours')
+            if actual_hours is None or not isinstance(actual_hours, (int, float)):
+                return Response(
+                    {'error': 'Actual hours is required and must be a number'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if actual_hours <= 0 or actual_hours > 24:
+                return Response(
+                    {'error': 'Hours must be between 0 and 24'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # If this is the first update, store original hours
+            if not signoff.original_hours:
+                signoff.original_hours = signoff.actual_hours
+
+            # Update actual hours
+            signoff.actual_hours = actual_hours
+            signoff.save()
+
+            serializer = self.get_serializer(signoff)
+            return Response(serializer.data)
+
+        except TokeSignOff.DoesNotExist:
+            return Response(
+                {'error': 'Toke sign off not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=False, methods=['get'])
     def last_shift(self, request):
@@ -121,31 +331,31 @@ class EarlyOutRequestViewSet(viewsets.ModelViewSet):
         list_type = request.query_params.get('list_type', 'dealer')
         shift = request.query_params.get('shift')
         
-        # Get all active requests for today (excluding REMOVED)
-        active_requests = EarlyOutRequest.objects.filter(
-            requested_at__date=today,
-            status__in=['PENDING', 'APPROVED']
-        ).exclude(
-            status='REMOVED'
-        )
+        # Get requests for today
+        queryset = EarlyOutRequest.objects.filter(
+            requested_at__date=today
+        ).exclude(status='REMOVED')
+
+        # Filter by status if provided
+        status = request.query_params.get('status')
+        if status:
+            queryset = queryset.filter(status=status)
+        else:
+            # Default to only PENDING and APPROVED
+            queryset = queryset.filter(status__in=['PENDING', 'APPROVED'])
 
         # Get the latest request for each user
         latest_requests = {}
-        for request in active_requests:
-            user_id = request.user_id
-            if user_id not in latest_requests or request.requested_at > latest_requests[user_id].requested_at:
-                # Only include if the request is not REMOVED
-                if request.status != 'REMOVED':
-                    latest_requests[user_id] = request
+        for req in queryset:
+            user_id = req.user_id
+            if user_id not in latest_requests or req.requested_at > latest_requests[user_id].requested_at:
+                latest_requests[user_id] = req
 
-        # Get the IDs of the latest active requests
+        # Get the IDs of the latest requests
         latest_request_ids = [req.id for req in latest_requests.values()]
 
-        # Filter the queryset to only include the latest active request for each user
-        queryset = self.queryset.filter(
-            id__in=latest_request_ids,
-            status__in=['PENDING', 'APPROVED']
-        )
+        # Filter to only include the latest request for each user
+        queryset = queryset.filter(id__in=latest_request_ids)
 
         # Filter by shift if provided
         if shift:
@@ -249,6 +459,89 @@ class EarlyOutRequestViewSet(viewsets.ModelViewSet):
             early_out.status = 'REMOVED'
             early_out.save()
             return Response(status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'])
+    def authorize(self, request, pk=None):
+        """Authorize an early out request."""
+        try:
+            # Only users with pencil_id or casino managers can authorize
+            if not (request.user.pencil_id or request.user.role == 'CASINO_MANAGER'):
+                return Response(
+                    {'error': 'Pencil ID required to authorize early outs'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            early_out = self.get_object()
+            
+            # Validate request status
+            if early_out.status != 'PENDING':
+                return Response(
+                    {'error': 'Only pending requests can be authorized'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Get required fields
+            hours_worked = request.data.get('hours_worked')
+            pencil_id = request.data.get('pencil_id') or request.user.pencil_id
+            toke_id = request.data.get('toke_id')
+
+            if not hours_worked:
+                return Response(
+                    {'error': 'Hours worked is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # For dealers, require toke_id
+            if early_out.user.role == 'DEALER' and not toke_id:
+                return Response(
+                    {'error': 'Toke ID is required for dealer early outs'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Get the toke sign off for today
+            today = timezone.now().date()
+            toke_signoff = TokeSignOff.objects.filter(
+                user=early_out.user,
+                toke__date=today
+            ).first()
+
+            if not toke_signoff:
+                return Response(
+                    {'error': 'No toke sign off found for today'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Update early out request
+            early_out.status = 'APPROVED'
+            early_out.authorized_by = request.user
+            early_out.authorized_by_name = f"{request.user.first_name} {request.user.last_name}"
+            early_out.hours_worked = hours_worked
+            early_out.processed_at = timezone.now()
+            early_out.toke_sign_off = toke_signoff
+            early_out.save()
+
+            # Update toke sign off actual hours
+            toke_signoff.actual_hours = hours_worked
+            toke_signoff.save()
+
+            # Return response with toke sign-off ID if it's a dealer
+            response_data = {
+                'id': early_out.id,
+                'status': early_out.status,
+                'authorized_by': early_out.authorized_by_name,
+                'hours_worked': early_out.hours_worked,
+                'processed_at': early_out.processed_at
+            }
+
+            if early_out.user.role == 'DEALER':
+                response_data['toke_sign_off'] = toke_id
+
+            return Response(response_data)
         except Exception as e:
             return Response(
                 {'error': str(e)},
